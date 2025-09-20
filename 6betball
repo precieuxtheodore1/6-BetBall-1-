@@ -1,0 +1,911 @@
+#!/usr/bin/env bash
+set -e
+
+ROOT="6-BetBall_Project"
+echo "Creating project structure in ./$ROOT ..."
+
+# Cleanup if exists
+rm -rf "$ROOT"
+mkdir -p "$ROOT"/{backend,client/public,client/src,mini-games}
+
+# ---------- BACKEND ----------
+mkdir -p "$ROOT/backend/models" "$ROOT/backend/controllers" "$ROOT/backend/routes"
+
+cat > "$ROOT/backend/package.json" <<'JSON'
+{
+  "name": "6-betball-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^7.4.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  }
+}
+JSON
+
+cat > "$ROOT/backend/.env.example" <<'ENV'
+PORT=3000
+JWT_SECRET=change_this_secret
+MONGO_URI=mongodb+srv://<user>:<password>@cluster0.mongodb.net/6betball?retryWrites=true&w=majority
+ENV
+
+cat > "$ROOT/backend/server.js" <<'NODE'
+require('dotenv').config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
+const MONGO_URI = process.env.MONGO_URI || '';
+
+/* ---------- Mongoose models ---------- */
+const userSchema = new mongoose.Schema({
+  name: { type: String, default: 'Utilisateur' },
+  phone: { type: String, required: true, unique: true },
+  email: { type: String, default: '' },
+  password: { type: String, required: true },
+  role: { type: String, default: 'user' },
+  balance: { type: Number, default: 0 },
+  activeDays: { type: Number, default: 0 },
+  wins: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now }
+});
+const challengeSchema = new mongoose.Schema({
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  game: String,
+  category: String,
+  time: String,
+  amount: Number,
+  opponentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  status: { type: String, default: 'open' },
+  createdAt: { type: Date, default: Date.now }
+});
+const messageSchema = new mongoose.Schema({
+  from: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  to: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  text: String,
+  ts: { type: Date, default: Date.now }
+});
+const matchSchema = new mongoose.Schema({
+  challengeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Challenge' },
+  startedAt: { type: Date, default: Date.now },
+  status: { type: String, default: 'ongoing' },
+  winnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  meta: { type: Object, default: {} }
+});
+
+const User = mongoose.model('User', userSchema);
+const Challenge = mongoose.model('Challenge', challengeSchema);
+const Message = mongoose.model('Message', messageSchema);
+const Match = mongoose.model('Match', matchSchema);
+
+/* ---------- DB connect ---------- */
+async function connectDB(){
+  if(!MONGO_URI){
+    console.warn('MONGO_URI not set in env, server will run but DB not connected.');
+    return;
+  }
+  await mongoose.connect(MONGO_URI, { dbName: '6betball' });
+  console.log('Connected to MongoDB');
+}
+connectDB().catch(err => console.error('DB error', err));
+
+/* ---------- helper auth ---------- */
+function authMiddleware(req, res, next){
+  const header = req.headers.authorization;
+  if(!header) return res.status(401).json({error:'Missing auth'});
+  const token = header.split(' ')[1];
+  try{
+    const data = jwt.verify(token, JWT_SECRET);
+    User.findById(data.id).then(user => {
+      if(!user) return res.status(401).json({error:'Invalid user'});
+      req.user = user;
+      next();
+    }).catch(err => res.status(500).json({error:'Server error'}));
+  }catch(err){
+    return res.status(401).json({error:'Invalid token'});
+  }
+}
+
+/* ---------- routes ---------- */
+
+// Register
+app.post('/api/register', async (req,res)=>{
+  try{
+    const { name, phone, email, password } = req.body;
+    if(!phone || !password) return res.status(400).json({ error: 'phone & password required' });
+    if(await User.findOne({ phone })) return res.status(400).json({ error: 'Phone exists' });
+    const u = new User({ name: name||'Utilisateur', phone, email: email||'', password });
+    await u.save();
+    const token = jwt.sign({ id: u._id }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: u._id, name: u.name, phone: u.phone, role: u.role, balance: u.balance }});
+  }catch(err){
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Login
+app.post('/api/login', async (req,res)=>{
+  try{
+    const { phone, password } = req.body;
+    const u = await User.findOne({ phone, password }).lean();
+    if(!u) return res.status(401).json({ error: 'Invalid credentials' });
+    const token = jwt.sign({ id: u._id }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: u._id, name: u.name, phone: u.phone, role: u.role, balance: u.balance }});
+  }catch(err){ res.status(500).json({ error: 'Server error' }); }
+});
+
+// Me
+app.get('/api/me', authMiddleware, async (req,res)=>{
+  const { password, ...rest } = req.user.toObject();
+  res.json(rest);
+});
+
+// Deposit
+app.post('/api/wallet/deposit', authMiddleware, async (req,res)=>{
+  const { amount } = req.body;
+  if(!amount || amount<=0) return res.status(400).json({ error: 'Invalid amount' });
+  req.user.balance += Number(amount);
+  await req.user.save();
+  res.json({ balance: req.user.balance });
+});
+
+// Withdraw
+app.post('/api/wallet/withdraw', authMiddleware, async (req,res)=>{
+  const { amount } = req.body;
+  if(!amount || amount<=0) return res.status(400).json({ error: 'Invalid amount' });
+  if(req.user.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
+  req.user.balance -= Number(amount);
+  await req.user.save();
+  res.json({ balance: req.user.balance });
+});
+
+// Create challenge
+app.post('/api/challenges', authMiddleware, async (req,res)=>{
+  try{
+    const { game, category, time, amount } = req.body;
+    if(!game||!category||!time||!amount) return res.status(400).json({ error: 'Missing fields' });
+    if(Number(amount) < 1) return res.status(400).json({ error: 'Minimum amount is 1' });
+    if(req.user.balance < amount) return res.status(400).json({ error: 'Insufficient funds to post challenge' });
+    req.user.balance -= Number(amount);
+    await req.user.save();
+    const ch = new Challenge({ ownerId: req.user._id, game, category, time, amount });
+    await ch.save();
+    res.json(ch);
+  }catch(err){ console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+// List challenges
+app.get('/api/challenges', authMiddleware, async (req,res)=>{
+  const list = await Challenge.find().sort({ createdAt: -1 }).lean();
+  res.json(list);
+});
+
+// Accept challenge
+app.post('/api/challenges/:id/accept', authMiddleware, async (req,res)=>{
+  try{
+    const ch = await Challenge.findById(req.params.id);
+    if(!ch) return res.status(404).json({ error: 'Challenge not found' });
+    if(ch.status !== 'open') return res.status(400).json({ error: 'Challenge not open' });
+    if(req.user.balance < ch.amount) return res.status(400).json({ error: 'Insufficient funds' });
+    req.user.balance -= ch.amount;
+    await req.user.save();
+    ch.opponentId = req.user._id;
+    ch.status = 'accepted';
+    await ch.save();
+    const match = new Match({ challengeId: ch._id, startedAt: new Date(), status:'ongoing' });
+    await match.save();
+    res.json({ challenge: ch, match });
+  }catch(err){ console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+// Finish match - backend uses distances/score if provided and decides winner (per rules sent by client)
+app.post('/api/matches/:id/finish', authMiddleware, async (req,res)=>{
+  try{
+    const { winner, distance, score } = req.body; // client may send distance/score
+    const match = await Match.findById(req.params.id);
+    if(!match) return res.status(404).json({ error: 'Match not found' });
+    const ch = await Challenge.findById(match.challengeId);
+    if(!ch) return res.status(404).json({ error: 'Linked challenge not found' });
+
+    // Basic authority check
+    if(req.user.role !== 'admin' && req.user._id.toString() !== ch.ownerId.toString() && req.user._id.toString() !== (ch.opponentId || '').toString())
+      return res.status(403).json({ error: 'Not allowed' });
+
+    // Persist meta
+    match.meta = match.meta || {};
+    match.meta[req.user._id] = { distance: distance||0, score: score||0, ts: new Date() };
+
+    // If winner explicitly provided by client use it (prototype). In production, server should verify.
+    if(winner === 'owner' || winner === 'opponent'){
+      // payout
+      let payout = 0;
+      if(winner === 'owner'){
+        const owner = await User.findById(ch.ownerId);
+        payout = ch.amount * 2;
+        if(owner){ owner.balance += payout; owner.wins += 1; await owner.save(); }
+        match.winnerId = ch.ownerId;
+      } else {
+        const opp = await User.findById(ch.opponentId);
+        payout = ch.amount * 2;
+        if(opp){ opp.balance += payout; opp.wins += 1; await opp.save(); }
+        match.winnerId = ch.opponentId;
+      }
+      ch.status = 'finished';
+      match.status = 'finished';
+      await match.save();
+      await ch.save();
+      return res.json({ match, payout });
+    }
+
+    // fallback: save and return current meta for admin resolution
+    await match.save();
+    res.json({ match });
+  }catch(err){ console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+// Messages
+app.post('/api/messages', authMiddleware, async (req,res)=>{
+  try{
+    const { to, text } = req.body;
+    if(!to || !text) return res.status(400).json({ error: 'Missing fields' });
+    const msg = new Message({ from: req.user._id, to, text });
+    await msg.save();
+    res.json(msg);
+  }catch(err){ console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+app.get('/api/messages', authMiddleware, async (req,res)=>{
+  const userMsgs = await Message.find({ $or: [{ to: req.user._id }, { from: req.user._id }] }).sort({ ts: -1 }).lean();
+  res.json(userMsgs);
+});
+
+// Seed demo
+app.post('/api/seed', async (req,res)=>{
+  try{
+    await User.deleteMany({});
+    await Challenge.deleteMany({});
+    await Message.deleteMany({});
+    await Match.deleteMany({});
+    const admin = new User({ name: 'Admin', phone: '000', email: '', password: 'admin', role: 'admin', balance: 10000, activeDays: 100 });
+    const manager = new User({ name: 'Manager', phone: '111', email: '', password: 'manager', role: 'manager', balance: 5000, activeDays: 50 });
+    await admin.save();
+    await manager.save();
+    res.json({ ok:true, users:[admin, manager] });
+  }catch(err){ console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+app.get('/api/health', (req,res)=>res.json({ ok:true, time:new Date() }));
+
+app.listen(PORT, ()=>console.log(`6-BetBall API on port ${PORT}`));
+NODE
+
+# ---------- CLIENT (React minimal) ----------
+cat > "$ROOT/client/package.json" <<'JSON'
+{
+  "name": "6-betball-client",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1"
+  },
+  "scripts": {
+    "start": "PORT=3001 react-scripts start",
+    "build": "react-scripts build"
+  }
+}
+JSON
+
+cat > "$ROOT/client/public/index.html" <<'HTML'
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>6-BetBall - Prototype</title>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
+HTML
+
+cat > "$ROOT/client/src/index.js" <<'JS'
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+import './styles.css';
+const container = document.getElementById('root');
+const root = createRoot(container);
+root.render(<App />);
+JS
+
+cat > "$ROOT/client/src/api.js" <<'JS'
+const API_BASE = process.env.REACT_APP_API || 'http://localhost:3000/api';
+export async function api(path, method = 'GET', token, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const data = await res.json();
+  if (!res.ok) throw data;
+  return data;
+}
+JS
+
+cat > "$ROOT/client/src/App.js" <<'JS'
+import React, { useEffect, useState } from 'react';
+import Navbar from './components/Navbar';
+import Home from './components/Home';
+import CreateChallenge from './components/CreateChallenge';
+import Invitations from './components/Invitations';
+import Messages from './components/Messages';
+import Live from './components/Live';
+import Profile from './components/Profile';
+import { api } from './api';
+
+function App() {
+  const [token, setToken] = useState(localStorage.getItem('token') || '');
+  const [user, setUser] = useState(null);
+  const [view, setView] = useState('home');
+
+  useEffect(() => {
+    if (token) {
+      api('/me', 'GET', token).then(setUser).catch(() => logout());
+    }
+  }, [token]);
+
+  function logout() {
+    setToken('');
+    setUser(null);
+    localStorage.removeItem('token');
+  }
+
+  async function handleLogin(phone, password) {
+    try {
+      const res = await api('/login', 'POST', null, { phone, password });
+      setToken(res.token);
+      localStorage.setItem('token', res.token);
+      setUser(res.user);
+    } catch (err) {
+      alert(err.error || 'Erreur connexion');
+    }
+  }
+
+  async function handleRegister(name, phone, email, password) {
+    try {
+      const res = await api('/register', 'POST', null, { name, phone, email, password });
+      setToken(res.token);
+      localStorage.setItem('token', res.token);
+      setUser(res.user);
+    } catch (err) {
+      alert(err.error || 'Erreur inscription');
+    }
+  }
+
+  return (
+    <div className="app">
+      <Navbar user={user} onNavigate={setView} onLogout={logout} />
+      <div className="container">
+        {!token ? (
+          <AuthForms onLogin={handleLogin} onRegister={handleRegister} />
+        ) : (
+          <>
+            {view === 'home' && <Home token={token} user={user} />}
+            {view === 'create' && <CreateChallenge token={token} user={user} />}
+            {view === 'inv' && <Invitations token={token} />}
+            {view === 'messages' && <Messages token={token} />}
+            {view === 'live' && <Live token={token} />}
+            {view === 'profile' && <Profile token={token} user={user} />}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AuthForms({ onLogin, onRegister }) {
+  const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  return (
+    <div className="auth">
+      <h2>Connexion / Inscription</h2>
+      <div className="card">
+        <h3>Se connecter</h3>
+        <input placeholder="Téléphone" value={phone} onChange={e => setPhone(e.target.value)} />
+        <input placeholder="Mot de passe" type="password" value={password} onChange={e => setPassword(e.target.value)} />
+        <button onClick={() => onLogin(phone, password)}>Connexion</button>
+      </div>
+      <div className="card">
+        <h3>S'inscrire</h3>
+        <input placeholder="Nom" value={name} onChange={e => setName(e.target.value)} />
+        <input placeholder="Téléphone" value={phone} onChange={e => setPhone(e.target.value)} />
+        <input placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} />
+        <input placeholder="Mot de passe" type="password" value={password} onChange={e => setPassword(e.target.value)} />
+        <button onClick={() => onRegister(name, phone, email, password)}>S'inscrire</button>
+      </div>
+    </div>
+  );
+}
+
+export default App;
+JS
+
+# components
+mkdir -p "$ROOT/client/src/components"
+
+cat > "$ROOT/client/src/components/Navbar.js" <<'JS'
+import React from 'react';
+export default function Navbar({ user, onNavigate, onLogout }) {
+  return (
+    <div className="nav">
+      <div style={{fontWeight:'bold', marginRight:20}}>6-BetBall</div>
+      <button onClick={() => onNavigate('home')}>Accueil</button>
+      <button onClick={() => onNavigate('create')}>Invitation aux défis</button>
+      <button onClick={() => onNavigate('inv')}>Invitations</button>
+      <button onClick={() => onNavigate('messages')}>Messages</button>
+      <button onClick={() => onNavigate('live')}>Live</button>
+      <div style={{marginLeft:'auto', display:'flex', gap:10, alignItems:'center'}}>
+        {user ? (
+          <>
+            <div>{user.name || user.phone} ({user.role})</div>
+            <button onClick={() => onNavigate('profile')}>Menu</button>
+            <button onClick={onLogout}>Se déconnecter</button>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+JS
+
+cat > "$ROOT/client/src/components/Home.js" <<'JS'
+import React, { useEffect, useState } from 'react';
+import { api } from '../api';
+export default function Home({ token, user }) {
+  const [challs, setChalls] = useState([]);
+  useEffect(() => {
+    api('/challenges', 'GET', token).then(setChalls).catch(e => console.error(e));
+  }, [token]);
+  async function accept(id) {
+    try {
+      const res = await api(`/challenges/${id}/accept`, 'POST', token);
+      alert('Défi accepté! Match lancé');
+      setChalls(prev => prev.map(c => c.id === id ? {...c, status:'accepted'} : c));
+    } catch (err) {
+      alert(err.error || 'Erreur');
+    }
+  }
+  return (
+    <div>
+      <h2>Accueil — Défis disponibles</h2>
+      <div className="card">
+        {challs.length === 0 && <div>Aucun défi pour l'instant</div>}
+        {challs.map(c => (
+          <div key={c._id} className="challenge">
+            <div>
+              <div><strong>{c.game}</strong> ({c.category})</div>
+              <div>Montant: {c.amount}</div>
+              <div>Heure: {c.time}</div>
+              <div>Statut: {c.status}</div>
+            </div>
+            <div>
+              {c.status === 'open' && c.ownerId !== user?.id ? (
+                <button className="primary" onClick={() => accept(c._id)}>Accepter</button>
+              ) : <div style={{fontSize:12}}>Propriétaire: {c.ownerId === user?.id ? 'Vous' : c.ownerId}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+JS
+
+cat > "$ROOT/client/src/components/CreateChallenge.js" <<'JS'
+import React, { useState } from 'react';
+import { api } from '../api';
+const categories = [
+  { key: 'sport', games: ['PES 2018','FIFA Mobile','Dream League Soccer','NBA 2K Mobile'] },
+  { key: 'action', games: ['Mortal Kombat','Tekken','Shadow Fight'] },
+  { key: 'arcade', games: ['Checkers','8 Ball Pool','Real Pool 3D'] },
+  { key: 'race', games: ['Asphalt 9','NFS No Limits','Real Racing 3'] },
+  { key: 'societe', games: ['Gangstar Vegas','Temple Run 2','Subway Surfers'] }
+];
+export default function CreateChallenge({ token }) {
+  const [category, setCategory] = useState('sport');
+  const [game, setGame] = useState(categories[0].games[0]);
+  const [time, setTime] = useState('');
+  const [amount, setAmount] = useState(500);
+  function updateGame(cat) {
+    const found = categories.find(c => c.key === cat);
+    setGame(found.games[0]);
+  }
+  async function submit() {
+    try {
+      const res = await api('/challenges', 'POST', token, { game, category, time, amount });
+      alert('Défi publié !');
+      setTime('');
+    } catch (err) {
+      alert(err.error || 'Erreur');
+    }
+  }
+  return (
+    <div>
+      <h2>Ajouter un défi</h2>
+      <div className="card">
+        <label>Type de jeu</label>
+        <select value={category} onChange={e => { setCategory(e.target.value); updateGame(e.target.value); }}>
+          {categories.map(c => <option key={c.key} value={c.key}>{c.key}</option>)}
+        </select>
+        <label>Jeu</label>
+        <select value={game} onChange={e => setGame(e.target.value)}>
+          {categories.find(c => c.key === category).games.map(g => <option key={g} value={g}>{g}</option>)}
+        </select>
+        <label>Heure (ex: 2025-09-20 18:00)</label>
+        <input value={time} onChange={e => setTime(e.target.value)} />
+        <label>Montant (min 500 CDF ou 1 USD) — prototype uses numeric</label>
+        <input type="number" value={amount} onChange={e => setAmount(Number(e.target.value))} />
+        <button className="primary" onClick={submit}>Publier le défi</button>
+      </div>
+    </div>
+  );
+}
+JS
+
+cat > "$ROOT/client/src/components/Invitations.js" <<'JS'
+import React from 'react';
+export default function Invitations() {
+  return (
+    <div>
+      <h2>Invitations</h2>
+      <div className="card">Ici seront listées les invitations reçues (prototype minimal).</div>
+    </div>
+  );
+}
+JS
+
+cat > "$ROOT/client/src/components/Messages.js" <<'JS'
+import React, { useEffect, useState } from 'react';
+import { api } from '../api';
+export default function Messages({ token }) {
+  const [msgs, setMsgs] = useState([]);
+  const [to, setTo] = useState('');
+  const [text, setText] = useState('');
+  useEffect(() => {
+    api('/messages', 'GET', token).then(setMsgs).catch(console.error);
+  }, [token]);
+  async function send() {
+    try {
+      const res = await api('/messages', 'POST', token, { to, text });
+      setMsgs(prev => [res, ...prev]);
+      setText('');
+    } catch (err) {
+      alert(err.error || 'Erreur');
+    }
+  }
+  return (
+    <div>
+      <h2>Messages</h2>
+      <div className="card">
+        <input placeholder="Destinataire (user id)" value={to} onChange={e=>setTo(e.target.value)} />
+        <textarea placeholder="Message" value={text} onChange={e=>setText(e.target.value)} />
+        <button className="primary" onClick={send}>Envoyer</button>
+      </div>
+      <div className="card">
+        {msgs.map(m => (
+          <div key={m._id} style={{padding:8, borderBottom:'1px solid #eee'}}>
+            <div><strong>{m.from}</strong> → <strong>{m.to}</strong></div>
+            <div>{m.text}</div>
+            <div style={{fontSize:12, color:'#666'}}>{new Date(m.ts).toLocaleString()}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+JS
+
+cat > "$ROOT/client/src/components/Live.js" <<'JS'
+import React from 'react';
+export default function Live() {
+  return (
+    <div>
+      <h2>Live</h2>
+      <div className="card">Ici apparaîtront les matchs en direct. (Prototype: voir /api/matches)</div>
+    </div>
+  );
+}
+JS
+
+cat > "$ROOT/client/src/components/Profile.js" <<'JS'
+import React, { useState } from 'react';
+import { api } from '../api';
+export default function Profile({ token, user }) {
+  const [amount, setAmount] = useState(1000);
+  async function deposit() {
+    try {
+      const res = await api('/wallet/deposit', 'POST', token, { amount });
+      alert('Dépôt effectué. Nouveau solde: ' + res.balance);
+    } catch (err) {
+      alert(err.error || 'Erreur');
+    }
+  }
+  async function withdraw() {
+    try {
+      const res = await api('/wallet/withdraw', 'POST', token, { amount });
+      alert('Retrait effectué. Nouveau solde: ' + res.balance);
+    } catch (err) {
+      alert(err.error || 'Erreur');
+    }
+  }
+  return (
+    <div>
+      <h2>Profil & Portefeuille</h2>
+      <div className="card">
+        <div><strong>Nom :</strong> {user?.name}</div>
+        <div><strong>Téléphone :</strong> {user?.phone}</div>
+        <div><strong>Rôle :</strong> {user?.role}</div>
+        <div><strong>Solde :</strong> {user?.balance}</div>
+      </div>
+      <div className="card">
+        <label>Montant</label>
+        <input type="number" value={amount} onChange={e=>setAmount(Number(e.target.value))} />
+        <button className="primary" onClick={deposit}>Déposer</button>
+        <button style={{marginLeft:10}} onClick={withdraw}>Retirer</button>
+      </div>
+      <div className="card">
+        <strong>Contacts projet:</strong>
+        <div>Chef du projet : Ing. Théodore MUNANGA NTUMBA</div>
+        <div>Email : toutfaitnombresarl@gmail.com</div>
+        <div>Tél : +243 975 551 224 / 099 174 1877</div>
+      </div>
+    </div>
+  );
+}
+JS
+
+cat > "$ROOT/client/src/styles.css" <<'CSS'
+body { font-family: Arial, Helvetica, sans-serif; margin:0; background:#f6f7fb; color:#222;}
+.app { display:flex; flex-direction:column; min-height:100vh;}
+.container { padding:20px; max-width:1000px; margin:0 auto; flex:1;}
+.nav { background:#1e293b; color:white; padding:10px 20px; display:flex; gap:10px; align-items:center;}
+.nav button { background:transparent; color:white; border:none; cursor:pointer; padding:8px 12px;}
+.card { background:white; padding:16px; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.08); margin-bottom:12px;}
+input, select, textarea { width:100%; padding:8px; margin:6px 0 10px 0; border-radius:4px; border:1px solid #ddd;}
+button.primary { background:#0ea5a4; color:white; border:none; padding:8px 12px; border-radius:6px; cursor:pointer;}
+.challenge { display:flex; justify-content:space-between; padding:8px 12px; border-bottom:1px solid #eee; }
+.auth { display:flex; gap:16px; justify-content:center; padding-top:30px;}
+CSS
+
+# ---------- MINI-GAMES (detailed files for seven games) ----------
+mkdir -p "$ROOT/mini-games"
+
+# Soccer (simple)
+mkdir -p "$ROOT/mini-games/SoccerGame"
+cat > "$ROOT/mini-games/SoccerGame/index.html" <<'HTML'
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Soccer</title><link rel="stylesheet" href="style.css"></head>
+<body><h2>Mini Soccer 6-BetBall</h2><canvas id="soccerCanvas" width="600" height="400"></canvas><div id="score">Score:0</div><button id="endGame">Terminer le match</button><script src="game.js"></script></body></html>
+HTML
+cat > "$ROOT/mini-games/SoccerGame/style.css" <<'CSS'
+body{font-family:Arial;text-align:center}canvas{background:green;border:2px solid #000;display:block;margin:10px auto}
+CSS
+cat > "$ROOT/mini-games/SoccerGame/game.js" <<'JS'
+const canvas = document.getElementById('soccerCanvas'); const ctx = canvas.getContext('2d');
+let ball = { x:300, y:200, r:10 }; let goal = { x:550, y:150, w:20, h:100 }; let score=0;
+document.addEventListener('keydown', (e)=>{ if(e.key==='ArrowUp') ball.y-=10; if(e.key==='ArrowDown') ball.y+=10; if(e.key==='ArrowLeft') ball.x-=10; if(e.key==='ArrowRight') ball.x+=10; checkGoal(); draw();});
+function checkGoal(){ if(ball.x+ball.r>goal.x && ball.y>goal.y && ball.y<goal.y+goal.h){ score++; ball.x=300; ball.y=200; document.getElementById('score').innerText='Score:'+score; }}
+function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.fillStyle='green'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.r,0,2*Math.PI); ctx.fillStyle='white'; ctx.fill(); ctx.closePath(); ctx.fillStyle='yellow'; ctx.fillRect(goal.x,goal.y,goal.w,goal.h);}
+draw();
+document.getElementById('endGame').addEventListener('click', async ()=>{
+  const matchId = localStorage.getItem('matchId')||'test123';
+  const winner = score >= 1 ? 'owner' : 'opponent';
+  const res = await fetch(`http://localhost:3000/api/matches/${matchId}/finish`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','Authorization':'Bearer '+localStorage.getItem('token')},
+    body: JSON.stringify({ winner, score })
+  });
+  const data = await res.json(); alert('Match terminé ! Gains : ' + (data.payout||0));
+});
+JS
+
+# Basketball
+mkdir -p "$ROOT/mini-games/BasketballGame"
+cat > "$ROOT/mini-games/BasketballGame/index.html" <<'HTML'
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Basket</title><link rel="stylesheet" href="style.css"></head><body><h2>Mini Basket</h2><div id="score">Score:0</div><div id="time">Time:60</div><p>Touche "ESPACE" pour tirer</p><button id="endGame">Terminer</button><script src="game.js"></script></body></html>
+HTML
+cat > "$ROOT/mini-games/BasketballGame/style.css" <<'CSS'
+body{font-family:Arial;text-align:center}
+CSS
+cat > "$ROOT/mini-games/BasketballGame/game.js" <<'JS'
+let score=0, timeLeft=60; const scoreEl=document.getElementById('score'); const timeEl=document.getElementById('time');
+document.addEventListener('keydown', e=>{ if(e.key===' ') { if(Math.random()>0.5) score++; scoreEl.innerText='Score:'+score }});
+const timer=setInterval(()=>{ timeLeft--; timeEl.innerText='Time:'+timeLeft; if(timeLeft<=0){ clearInterval(timer); endGame(); } },1000);
+async function endGame(){ const matchId=localStorage.getItem('matchId')||'test123'; const winner = score>=5?'owner':'opponent';
+ const res = await fetch(`http://localhost:3000/api/matches/${matchId}/finish`, { method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+localStorage.getItem('token')}, body: JSON.stringify({ winner, score })});
+ const data = await res.json(); alert('Match terminé ! Score: '+score+' Gains: '+(data.payout||0)); }
+document.getElementById('endGame').addEventListener('click', endGame);
+JS
+
+# Combat (Karaté)
+mkdir -p "$ROOT/mini-games/CombatGame"
+cat > "$ROOT/mini-games/CombatGame/index.html" <<'HTML'
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Combat</title><link rel="stylesheet" href="style.css"></head><body><h2>Combat</h2><canvas id="combatCanvas" width="600" height="400"></canvas><div id="info">P:100 | E:100</div><button id="endGame">Terminer</button><script src="game.js"></script></body></html>
+HTML
+cat > "$ROOT/mini-games/CombatGame/style.css" <<'CSS'
+body{font-family:Arial;text-align:center}canvas{display:block;margin:10px auto;border:2px solid #000}
+CSS
+cat > "$ROOT/mini-games/CombatGame/game.js" <<'JS'
+const canvas=document.getElementById('combatCanvas'), ctx=canvas.getContext('2d');
+let player={x:100,y:300,w:50,h:50,health:100}, enemy={x:450,y:300,w:50,h:50,health:100};
+function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.fillStyle='blue'; ctx.fillRect(player.x,player.y,player.w,player.h); ctx.fillStyle='red'; ctx.fillRect(enemy.x,enemy.y,enemy.w,enemy.h); document.getElementById('info').innerText=`P:${player.health} | E:${enemy.health}`; }
+draw();
+document.addEventListener('keydown', e=>{ if(e.key==='ArrowUp') player.y-=10; if(e.key==='ArrowDown') player.y+=10; if(e.key==='a') enemy.health-=10; if(e.key==='d') player.health-=5; draw(); if(player.health<=0||enemy.health<=0) endGame();});
+async function endGame(){ const winner = (player.health>0)?'owner':'opponent'; const matchId=localStorage.getItem('matchId')||'test123'; const res=await fetch(`http://localhost:3000/api/matches/${matchId}/finish`,{ method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+localStorage.getItem('token')}, body: JSON.stringify({ winner })}); const data=await res.json(); alert('Combat terminé ! Gains : '+(data.payout||0)); }
+document.getElementById('endGame').addEventListener('click', endGame);
+JS
+
+# Billard
+mkdir -p "$ROOT/mini-games/BillardGame"
+cat > "$ROOT/mini-games/BillardGame/index.html" <<'HTML'
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Billard</title><link rel="stylesheet" href="style.css"></head><body><h2>Billard</h2><canvas id="poolCanvas" width="600" height="400"></canvas><button id="endGame">Terminer</button><script src="game.js"></script></body></html>
+HTML
+cat > "$ROOT/mini-games/BillardGame/style.css" <<'CSS'
+body{font-family:Arial;text-align:center}canvas{background:#0B6623;display:block;margin:10px auto;border:2px solid #000}
+CSS
+cat > "$ROOT/mini-games/BillardGame/game.js" <<'JS'
+const canvas=document.getElementById('poolCanvas'), ctx=canvas.getContext('2d');
+let ball={x:300,y:200,r:10}, target={x:500,y:200,r:10}, score=0;
+canvas.addEventListener('click', e=>{ const dx=e.offsetX-ball.x, dy=e.offsetY-ball.y; ball.x+=dx*0.5; ball.y+=dy*0.5; if(Math.hypot(ball.x-target.x, ball.y-target.y) < ball.r+target.r){ score++; ball.x=300; ball.y=200; alert('Bille rentrée ! Score: '+score); } draw();});
+function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.fillStyle='white'; ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.r,0,2*Math.PI); ctx.fill(); ctx.fillStyle='yellow'; ctx.beginPath(); ctx.arc(target.x,target.y,target.r,0,2*Math.PI); ctx.fill();}
+draw();
+document.getElementById('endGame').addEventListener('click', async ()=>{ const winner = score>=1 ? 'owner':'opponent'; const matchId=localStorage.getItem('matchId')||'test123'; const res=await fetch(`http://localhost:3000/api/matches/${matchId}/finish`,{ method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+localStorage.getItem('token')}, body: JSON.stringify({ winner, score })}); const data=await res.json(); alert('Match terminé ! Gains: '+(data.payout||0));});
+JS
+
+# Dames 20x20
+mkdir -p "$ROOT/mini-games/DamesGame"
+cat > "$ROOT/mini-games/DamesGame/index.html" <<'HTML'
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Dames 20x20</title><link rel="stylesheet" href="style.css"></head><body><h2>Dames 20x20</h2><canvas id="board" width="600" height="600"></canvas><button id="endGame">Terminer</button><script src="game.js"></script></body></html>
+HTML
+cat > "$ROOT/mini-games/DamesGame/style.css" <<'CSS'
+body{font-family:Arial;text-align:center}canvas{border:2px solid #000;display:block;margin:10px auto}
+CSS
+cat > "$ROOT/mini-games/DamesGame/game.js" <<'JS'
+const canvas=document.getElementById('board'); const ctx=canvas.getContext('2d');
+const ROWS=20, COLS=20, CELL=canvas.width/COLS; let board=[];
+for(let r=0;r<ROWS;r++){ board[r]=[]; for(let c=0;c<COLS;c++){ if(r<5 && (r+c)%2==1) board[r][c]='B'; else if(r>14 && (r+c)%2==1) board[r][c]='W'; else board[r][c]=''; }} 
+function draw(){ for(let r=0;r<ROWS;r++){ for(let c=0;c<COLS;c++){ ctx.fillStyle=(r+c)%2==0?'#f0d9b5':'#b58863'; ctx.fillRect(c*CELL,r*CELL,CELL,CELL); if(board[r][c]!==''){ ctx.fillStyle=board[r][c]==='B'?'black':'white'; ctx.beginPath(); ctx.arc(c*CELL+CELL/2,r*CELL+CELL/2,CELL/2-2,0,2*Math.PI); ctx.fill(); }}}}
+draw();
+let selected=null;
+canvas.addEventListener('click', e=>{ const c=Math.floor(e.offsetX/CELL), r=Math.floor(e.offsetY/CELL); if(selected){ board[r][c]=board[selected.r][selected.c]; board[selected.r][selected.c]=''; selected=null; draw(); } else { if(board[r][c]!=='') selected={r,c}; }});
+document.getElementById('endGame').addEventListener('click', async ()=>{ const matchId=localStorage.getItem('matchId')||'test123'; const winner = Math.random()>0.5?'owner':'opponent'; const res = await fetch(`http://localhost:3000/api/matches/${matchId}/finish`,{ method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+localStorage.getItem('token')}, body: JSON.stringify({ winner })}); const data=await res.json(); alert('Partie terminée. Gains: '+(data.payout||0));});
+JS
+
+# Racing (10 km rules)
+mkdir -p "$ROOT/mini-games/RacingGame"
+cat > "$ROOT/mini-games/RacingGame/index.html" <<'HTML'
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Racing</title><link rel="stylesheet" href="style.css"></head><body><h2>Course (Racing) 6-BetBall</h2><canvas id="raceCanvas" width="600" height="400"></canvas><div id="score">Distance:0 m</div><button id="endGame">Terminer</button><script src="game.js"></script></body></html>
+HTML
+cat > "$ROOT/mini-games/RacingGame/style.css" <<'CSS'
+body{font-family:Arial;text-align:center}canvas{border:2px solid #000;display:block;margin:10px auto;background:#444}
+CSS
+cat > "$ROOT/mini-games/RacingGame/game.js" <<'JS'
+const canvas=document.getElementById('raceCanvas'), ctx=canvas.getContext('2d');
+let car={x:270,y:350,w:60,h:30}, obstacles=[], distance=0, gameOver=false;
+const finishDistance=10000, minDistance=1000;
+function spawn(){ obstacles.push({x:Math.random()*540,y:0,w:60,h:30}); }
+setInterval(spawn,1500);
+document.addEventListener('keydown', e=>{ if(e.key==='ArrowLeft') car.x-=10; if(e.key==='ArrowRight') car.x+=10;});
+function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.fillStyle='blue'; ctx.fillRect(car.x,car.y,car.w,car.h); ctx.fillStyle='red'; obstacles.forEach(o=>ctx.fillRect(o.x,o.y,o.w,o.h)); }
+function update(){ if(gameOver) return; distance+=10; document.getElementById('score').innerText='Distance: '+distance+' m'; obstacles.forEach(o=>o.y+=5); obstacles.forEach(o=>{ if(o.x<car.x+car.w && o.x+o.w>car.x && o.y<car.y+car.h && o.y+o.h>car.y){ gameOver=true; endGame(); } }); draw(); requestAnimationFrame(update); }
+update();
+async function endGame(){ const playerDistance=distance; const opponentDistance=parseInt(localStorage.getItem('opponentDistance'))||0; let winner;
+ if(playerDistance>=finishDistance && opponentDistance>=finishDistance) winner='restart';
+ else if(playerDistance>=finishDistance) winner='owner';
+ else if(opponentDistance>=finishDistance) winner='opponent';
+ else if(playerDistance>=minDistance && opponentDistance<minDistance) winner='owner';
+ else if(opponentDistance>=minDistance && playerDistance<minDistance) winner='opponent';
+ else winner='draw';
+ const matchId=localStorage.getItem('matchId')||'test123';
+ const res=await fetch(`http://localhost:3000/api/matches/${matchId}/finish`,{ method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+localStorage.getItem('token')}, body: JSON.stringify({ winner, distance: playerDistance })});
+ const data=await res.json(); alert('Course terminée! Distance:'+playerDistance+' m, Gains:'+(data.payout||0));
+}
+document.getElementById('endGame').addEventListener('click', endGame);
+JS
+
+# TempleRun (2000 m rules)
+mkdir -p "$ROOT/mini-games/TempleRunGame"
+cat > "$ROOT/mini-games/TempleRunGame/index.html" <<'HTML'
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Temple Run</title><link rel="stylesheet" href="style.css"></head><body><h2>Temple Run 6-BetBall</h2><canvas id="templeCanvas" width="600" height="400"></canvas><div id="score">Distance:0 m</div><button id="endGame">Terminer</button><script src="game.js"></script></body></html>
+HTML
+cat > "$ROOT/mini-games/TempleRunGame/style.css" <<'CSS'
+body{font-family:Arial;text-align:center}canvas{border:2px solid #000;display:block;margin:10px auto;background:#ddd}
+CSS
+cat > "$ROOT/mini-games/TempleRunGame/game.js" <<'JS'
+const canvas=document.getElementById('templeCanvas'), ctx=canvas.getContext('2d');
+let runner={x:50,y:350,w:30,h:50,vy:0}, obstacles=[], distance=0, gameOver=false;
+const finishDistance=2000, minDistance=1000;
+document.addEventListener('keydown', e=>{ if(e.key===' ') runner.vy=-15; });
+function spawn(){ obstacles.push({x:600,y:370,w:30,h:30}); }
+setInterval(spawn,1500);
+function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.fillStyle='green'; ctx.fillRect(runner.x,runner.y,runner.w,runner.h); ctx.fillStyle='brown'; obstacles.forEach(o=>ctx.fillRect(o.x,o.y,o.w,o.h)); document.getElementById('score').innerText='Distance: '+distance+' m'; }
+function update(){ if(gameOver) return; runner.vy+=1; runner.y+=runner.vy; if(runner.y>350) runner.y=350, runner.vy=0; obstacles.forEach(o=>o.x-=5); obstacles=obstacles.filter(o=>o.x+o.w>0); obstacles.forEach(o=>{ if(o.x<runner.x+runner.w && o.x+o.w>runner.x && o.y<runner.y+runner.h && o.y+o.h>runner.y){ gameOver=true; endGame(); } }); distance+=5; draw(); requestAnimationFrame(update); }
+update();
+async function endGame(){ const playerDistance=distance; const opponentDistance=parseInt(localStorage.getItem('opponentDistance'))||0; let winner;
+ if(playerDistance>=finishDistance && opponentDistance>=finishDistance) winner='restart';
+ else if(playerDistance>=finishDistance) winner='owner';
+ else if(opponentDistance>=finishDistance) winner='opponent';
+ else if(playerDistance>=minDistance && opponentDistance<minDistance) winner='owner';
+ else if(opponentDistance>=minDistance && playerDistance<minDistance) winner='opponent';
+ else winner='draw';
+ const matchId=localStorage.getItem('matchId')||'test123';
+ const res=await fetch(`http://localhost:3000/api/matches/${matchId}/finish`,{ method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+localStorage.getItem('token')}, body: JSON.stringify({ winner, distance: playerDistance })});
+ const data=await res.json(); alert('Temple Run terminé! Distance:'+playerDistance+' m, Gains:'+(data.payout||0));
+}
+document.getElementById('endGame').addEventListener('click', endGame);
+JS
+
+# README and LICENSE
+cat > "$ROOT/README.md" <<'MD'
+# 6-BetBall - Prototype
+
+Structure:
+- backend/ : Node.js + Express + Mongoose API
+- client/ : React prototype (frontend)
+- mini-games/ : 7 mini-games HTML5 (Soccer, Basketball, Dames20x20, Combat, Billard, Racing, TempleRun)
+
+Setup (local or Replit):
+1. Backend:
+   - cd backend
+   - cp .env.example .env (edit MONGO_URI and JWT_SECRET)
+   - npm install
+   - npm run dev
+2. Client:
+   - cd client
+   - npm install
+   - npm start
+
+Notes:
+- This is an MVP prototype. For production: hash passwords, secure payments, add validations, tests.
+MD
+
+cat > "$ROOT/LICENSE" <<'TXT'
+MIT License
+TXT
+
+# Create zip
+ZIP="/mnt/data/6-BetBall_Project_Complete.zip"
+rm -f "$ZIP"
+cd "$ROOT"
+zip -r "$ZIP" .
+cd ..
+echo "ZIP created at $ZIP"
