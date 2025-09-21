@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>6-BetBall - Jeux</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f3f3f3;
+      text-align: center;
+      padding: 20px;
+    }
+    h1 {
+      color: #2c3e50;
+    }
+    .games-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    a {
+      display: block;
+      padding: 20px;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+      text-decoration: none;
+      color: #333;
+      font-size: 18px;
+      transition: 0.2s;
+    }
+    a:hover {
+      background: #3498db;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎮 Jeux 6-BetBall</h1>
+  <p>Choisissez un type de jeu pour commencer :</p>
+
+  <div class="games-grid">
+    <a href="football.html">⚽ Football</a>
+    <a href="basketball.html">🏀 Basketball</a>
+    <a href="dames.html">♟️ Dames (20x20)</a>
+    <a href="karate.html">🥋 Karaté</a>
+    <a href="racing.html">🚗 Course/Racing</a>
+    <a href="templeRun.html">🏃 Temple Run</a>
+  </div>
+</body>
+</html>
