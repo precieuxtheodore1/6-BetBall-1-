@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Jeux - 6-BetBall</title>
+<style>
+  body{font-family:Arial;text-align:center;padding:20px;background:#f6f7fb}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;max-width:800px;margin:0 auto}
+  a{display:block;padding:18px;background:#fff;border-radius:8px;text-decoration:none;color:#333;box-shadow:0 2px 6px rgba(0,0,0,0.08)}
+  a:hover{background:#0ea5a4;color:white}
+</style>
+</head>
+<body>
+  <h1>🎮 Jeux 6-BetBall</h1>
+  <div class="grid">
+    <a href="football.html" target="_blank">⚽ Football</a>
+    <a href="basketball.html" target="_blank">🏀 Basketball</a>
+    <a href="dames.html" target="_blank">♟️ Dames (20x20)</a>
+    <a href="karate.html" target="_blank">🥋 Karaté</a>
+    <a href="billard.html" target="_blank">🎱 Billard</a>
+    <a href="racing.html" target="_blank">🚗 Racing</a>
+    <a href="templeRun.html" target="_blank">🏃 Temple Run</a>
+  </div>
+  <p style="margin-top:18px;color:#666">Chaque jeu envoie son résultat à l'API via fetch vers <code>/api/matches/:id/finish</code> (voir backend)</p>
+</body>
+</html>
